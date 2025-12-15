@@ -337,6 +337,11 @@
                       <i v-else class="fas fa-sort ml-1 text-gray-400" />
                     </th>
                     <th
+                      class="min-w-[140px] px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300"
+                    >
+                      Claude Code 版本
+                    </th>
+                    <th
                       class="min-w-[70px] px-3 py-4 text-right text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300"
                       :class="{
                         'cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-600': canSortByCost,
@@ -604,6 +609,29 @@
                           />
                           {{ key.isActive ? '活跃' : '禁用' }}
                         </span>
+                      </td>
+                      <!-- Claude Code 版本 -->
+                      <td class="px-3 py-3 text-xs">
+                        <div class="space-y-1">
+                          <div class="flex items-center gap-1">
+                            <span class="font-semibold text-gray-800 dark:text-gray-100">
+                              {{ key.claudeCodeClientVersion || '未上报' }}
+                            </span>
+                            <span
+                              v-if="isClaudeVersionMismatch(key)"
+                              class="text-red-500"
+                              title="客户端与服务器版本不一致"
+                            >
+                              <i class="fas fa-exclamation-triangle" />
+                            </span>
+                          </div>
+                          <div
+                            v-if="key.claudeCodeServerVersion"
+                            class="text-[11px] text-gray-500 dark:text-gray-400"
+                          >
+                            服务器: {{ key.claudeCodeServerVersion }}
+                          </div>
+                        </div>
                       </td>
                       <!-- 费用 -->
                       <td class="whitespace-nowrap px-3 py-3 text-right" style="font-size: 13px">
@@ -1796,6 +1824,11 @@
                         所属账号
                       </th>
                       <th
+                        class="min-w-[140px] px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300"
+                      >
+                        Claude Code 版本
+                      </th>
+                      <th
                         v-if="isLdapEnabled"
                         class="min-w-[120px] px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300"
                       >
@@ -1902,6 +1935,29 @@
                           <div v-else class="text-xs text-gray-500 dark:text-gray-400">
                             <i class="fas fa-share-alt mr-1" />
                             共享池
+                          </div>
+                        </div>
+                      </td>
+                      <!-- Claude Code 版本 -->
+                      <td class="px-3 py-3 text-xs">
+                        <div class="space-y-1">
+                          <div class="flex items-center gap-1">
+                            <span class="font-semibold text-gray-800 dark:text-gray-100">
+                              {{ key.claudeCodeClientVersion || '未上报' }}
+                            </span>
+                            <span
+                              v-if="isClaudeVersionMismatch(key)"
+                              class="text-red-500"
+                              title="客户端与服务器版本不一致"
+                            >
+                              <i class="fas fa-exclamation-triangle" />
+                            </span>
+                          </div>
+                          <div
+                            v-if="key.claudeCodeServerVersion"
+                            class="text-[11px] text-gray-500 dark:text-gray-400"
+                          >
+                            服务器: {{ key.claudeCodeServerVersion }}
                           </div>
                         </div>
                       </td>
@@ -2167,6 +2223,17 @@ const globalDateFilter = reactive({
 const shouldShowCheckboxes = computed(() => {
   return showCheckboxes.value
 })
+
+const isClaudeVersionMismatch = (key) => {
+  if (!key) {
+    return false
+  }
+
+  const clientVersion = key.claudeCodeClientVersion
+  const serverVersion = key.claudeCodeServerVersion
+
+  return !!(clientVersion && serverVersion && clientVersion !== serverVersion)
+}
 
 // 切换选择模式
 const toggleSelectionMode = () => {

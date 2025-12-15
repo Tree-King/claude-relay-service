@@ -17,6 +17,8 @@ const requestIdentityService = require('./requestIdentityService')
 const { createClaudeTestPayload } = require('../utils/testPayloadHelper')
 const userMessageQueueService = require('./userMessageQueueService')
 const { isStreamWritable } = require('../utils/streamHelper')
+const apiKeyService = require('./apiKeyService')
+const conversationLogService = require('./conversationLogService')
 
 class ClaudeRelayService {
   constructor() {
@@ -323,6 +325,8 @@ class ClaudeRelayService {
       }
 
       // 发送请求到Claude API（传入回调以获取请求对象）
+      const requestOptions = { ...options, apiKeyData, accountType }
+
       const response = await this._makeClaudeRequest(
         processedBody,
         accessToken,
@@ -332,7 +336,7 @@ class ClaudeRelayService {
         (req) => {
           upstreamRequest = req
         },
-        options
+        requestOptions
       )
 
       // 📬 请求已发送成功，立即释放队列锁（无需等待响应处理完成）
@@ -987,10 +991,73 @@ class ClaudeRelayService {
     accessToken,
     options = {}
   ) {
-    const { account, accountType, sessionHash, requestOptions = {}, isStream = false } = options
+    const {
+      account,
+      accountType,
+      sessionHash,
+      requestOptions = {},
+      isStream = false,
+      apiKeyData
+    } = options
 
     // 获取统一的 User-Agent
     const unifiedUA = await this.captureAndGetUnifiedUserAgent(clientHeaders, account)
+
+    const clientUserAgent = clientHeaders?.['user-agent'] || clientHeaders?.['User-Agent'] || ''
+    const clientClaudeVersion = this.extractClaudeCodeVersion(clientUserAgent)
+    const serverClaudeVersion = this.extractClaudeCodeVersion(unifiedUA)
+
+    if (apiKeyData?.id && (clientClaudeVersion || serverClaudeVersion)) {
+      apiKeyService.recordClaudeCodeVersion(apiKeyData.id, clientClaudeVersion, serverClaudeVersion)
+    }
+
+    if (account?.useUnifiedUserAgent === 'true' && unifiedUA && serverClaudeVersion) {
+      const isMissingClientVersion = !clientClaudeVersion
+      const hasMismatch =
+        clientClaudeVersion &&
+        this.compareSemanticVersions(clientClaudeVersion, serverClaudeVersion) !== 0
+
+      if (isMissingClientVersion || hasMismatch) {
+        const abortResponse = {
+          statusCode: 409,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            error: 'claude_code_version_mismatch',
+            message: isMissingClientVersion
+              ? `未检测到客户端 Claude Code 版本，服务器要求版本为 ${serverClaudeVersion}，请升级并重试。`
+              : `客户端 Claude Code 版本(${clientClaudeVersion}) 与服务器要求的版本(${serverClaudeVersion}) 不一致，请升级后重试。`
+          })
+        }
+
+        logger.warn(
+          `🚫 Claude Code version mismatch for key ${apiKeyData?.name || apiKeyData?.id || 'unknown'}: client ${clientClaudeVersion || 'missing'} vs server ${serverClaudeVersion}`
+        )
+
+        if (apiKeyData?.id) {
+          try {
+            await conversationLogService.recordConversation({
+              apiKeyId: apiKeyData.id,
+              accountId,
+              accountType: accountType || account?.accountType || null,
+              requestBody: body,
+              responseBody: abortResponse.body,
+              model: body?.model,
+              isStream,
+              clientVersion: clientClaudeVersion,
+              serverVersion: serverClaudeVersion
+            })
+          } catch (error) {
+            logger.error('❌ Failed to record conversation log for version mismatch:', error)
+          }
+        }
+
+        return {
+          abortResponse,
+          clientClaudeVersion,
+          serverClaudeVersion
+        }
+      }
+    }
 
     // 获取过滤后的客户端 headers
     const filteredHeaders = this._filterClientHeaders(clientHeaders)
@@ -1027,7 +1094,7 @@ class ClaudeRelayService {
     })
 
     if (extensionResult.abortResponse) {
-      return { abortResponse: extensionResult.abortResponse }
+    return { abortResponse: extensionResult.abortResponse }
     }
 
     requestPayload = extensionResult.body
@@ -1068,7 +1135,9 @@ class ClaudeRelayService {
       requestPayload,
       bodyString,
       headers,
-      isRealClaudeCode
+      isRealClaudeCode,
+      clientClaudeVersion,
+      serverClaudeVersion
     }
   }
 
@@ -1114,27 +1183,25 @@ class ClaudeRelayService {
   ) {
     const url = new URL(this.claudeApiUrl)
 
+    const { apiKeyData, accountType } = requestOptions
+
     // 获取账户信息用于统一 User-Agent
     const account = await claudeAccountService.getAccount(accountId)
 
     // 使用公共方法准备请求头和 payload
-    const prepared = await this._prepareRequestHeadersAndPayload(
-      body,
-      clientHeaders,
-      accountId,
-      accessToken,
-      {
-        account,
-        requestOptions,
-        isStream: false
-      }
-    )
+    const prepared = await this._prepareRequestHeadersAndPayload(body, clientHeaders, accountId, accessToken, {
+      account,
+      requestOptions,
+      isStream: false,
+      apiKeyData,
+      accountType
+    })
 
     if (prepared.abortResponse) {
       return prepared.abortResponse
     }
 
-    const { bodyString, headers } = prepared
+    const { bodyString, headers, clientClaudeVersion, serverClaudeVersion } = prepared
 
     return new Promise((resolve, reject) => {
       // 支持自定义路径（如 count_tokens）
@@ -1162,7 +1229,7 @@ class ClaudeRelayService {
           responseData = Buffer.concat([responseData, chunk])
         })
 
-        res.on('end', () => {
+        res.on('end', async () => {
           try {
             let responseBody = ''
 
@@ -1189,10 +1256,24 @@ class ClaudeRelayService {
             const response = {
               statusCode: res.statusCode,
               headers: res.headers,
-              body: responseBody
+              body: responseBody,
+              clientClaudeVersion,
+              serverClaudeVersion
             }
 
             logger.debug(`🔗 Claude API response: ${res.statusCode}`)
+
+            await conversationLogService.recordConversation({
+              apiKeyId: apiKeyData?.id,
+              accountId,
+              accountType: accountType || account?.accountType || null,
+              requestBody: body,
+              responseBody,
+              model: body?.model,
+              isStream: false,
+              clientVersion: clientClaudeVersion,
+              serverVersion: serverClaudeVersion
+            })
 
             resolve(response)
           } catch (error) {
@@ -1230,6 +1311,22 @@ class ClaudeRelayService {
           await this._handleServerError(accountId, 504, null, 'Network')
         }
 
+        try {
+          await conversationLogService.recordConversation({
+            apiKeyId: apiKeyData?.id,
+            accountId,
+            accountType: accountType || account?.accountType || null,
+            requestBody: body,
+            responseBody: errorMessage,
+            model: body?.model,
+            isStream: false,
+            clientVersion: clientClaudeVersion,
+            serverVersion: serverClaudeVersion
+          })
+        } catch (logError) {
+          logger.error('❌ Failed to record conversation log for upstream request error:', logError)
+        }
+
         reject(new Error(errorMessage))
       })
 
@@ -1238,6 +1335,22 @@ class ClaudeRelayService {
         logger.error(`❌ Claude API request timeout (Account: ${accountId})`)
 
         await this._handleServerError(accountId, 504, null, 'Request')
+
+        try {
+          await conversationLogService.recordConversation({
+            apiKeyId: apiKeyData?.id,
+            accountId,
+            accountType: accountType || account?.accountType || null,
+            requestBody: body,
+            responseBody: 'Request timeout',
+            model: body?.model,
+            isStream: false,
+            clientVersion: clientClaudeVersion,
+            serverVersion: serverClaudeVersion
+          })
+        } catch (logError) {
+          logger.error('❌ Failed to record conversation log for request timeout:', logError)
+        }
 
         reject(new Error('Request timeout'))
       })
@@ -1421,6 +1534,8 @@ class ClaudeRelayService {
       const proxyAgent = await this._getProxyAgent(accountId)
 
       // 发送流式请求并捕获usage数据
+      const streamOptions = { ...options, apiKeyData }
+
       await this._makeClaudeStreamRequestWithUsageCapture(
         processedBody,
         accessToken,
@@ -1437,7 +1552,7 @@ class ClaudeRelayService {
         accountType,
         sessionHash,
         streamTransformer,
-        options,
+        streamOptions,
         isDedicatedOfficialAccount,
         // 📬 新增回调：在收到响应头时释放队列锁
         async () => {
@@ -1516,15 +1631,26 @@ class ClaudeRelayService {
         accountType,
         sessionHash,
         requestOptions,
-        isStream: true
+        isStream: true,
+        apiKeyData: requestOptions.apiKeyData
       }
     )
 
     if (prepared.abortResponse) {
+      if (isStreamWritable(responseStream)) {
+        try {
+          responseStream.status(prepared.abortResponse.statusCode || 400)
+          responseStream.setHeader('Content-Type', 'application/json')
+          responseStream.write(prepared.abortResponse.body || '')
+          responseStream.end()
+        } catch (error) {
+          logger.error('❌ Failed to send abort response for stream request:', error)
+        }
+      }
       return prepared.abortResponse
     }
 
-    const { bodyString, headers } = prepared
+    const { bodyString, headers, clientClaudeVersion, serverClaudeVersion } = prepared
 
     return new Promise((resolve, reject) => {
       const url = new URL(this.claudeApiUrl)
@@ -1686,6 +1812,25 @@ class ClaudeRelayService {
               `❌ Claude API error response (Account: ${account?.name || accountId}):`,
               errorData
             )
+
+            ;(async () => {
+              try {
+                await conversationLogService.recordConversation({
+                  apiKeyId: requestOptions.apiKeyData?.id,
+                  accountId,
+                  accountType,
+                  requestBody: body,
+                  responseBody: errorData || `Claude API error: ${res.statusCode}`,
+                  model: body?.model,
+                  isStream: true,
+                  clientVersion: clientClaudeVersion,
+                  serverVersion: serverClaudeVersion
+                })
+              } catch (logError) {
+                logger.error('❌ Failed to record stream conversation log for upstream error:', logError)
+              }
+            })()
+
             if (this._isOrganizationDisabledError(res.statusCode, errorData)) {
               ;(async () => {
                 try {
@@ -1757,6 +1902,7 @@ class ClaudeRelayService {
         const allUsageData = [] // 收集所有的usage事件
         let currentUsageData = {} // 当前正在收集的usage数据
         let rateLimitDetected = false // 限流检测标志
+        const responseTextFragments = []
 
         // 监听数据块，解析SSE并寻找usage信息
         res.on('data', (chunk) => {
@@ -1799,6 +1945,18 @@ class ClaudeRelayService {
                 }
                 try {
                   const data = JSON.parse(jsonStr)
+
+                  if (data.type === 'content_block_start' && data.content_block?.text) {
+                    responseTextFragments.push(data.content_block.text)
+                  }
+
+                  if (data.type === 'content_block_delta' && data.delta?.text) {
+                    responseTextFragments.push(data.delta.text)
+                  }
+
+                  if (data.type === 'message_delta' && data.delta?.text) {
+                    responseTextFragments.push(data.delta.text)
+                  }
 
                   // 收集来自不同事件的usage数据
                   if (data.type === 'message_start' && data.message && data.message.usage) {
@@ -2005,6 +2163,24 @@ class ClaudeRelayService {
             }
           }
 
+          const finalResponseText = responseTextFragments.join('') || null
+
+          try {
+            await conversationLogService.recordConversation({
+              apiKeyId: requestOptions.apiKeyData?.id,
+              accountId,
+              accountType,
+              requestBody: body,
+              responseBody: finalResponseText,
+              model: body?.model,
+              isStream: true,
+              clientVersion: clientClaudeVersion,
+              serverVersion: serverClaudeVersion
+            })
+          } catch (error) {
+            logger.error('❌ Failed to record stream conversation log:', error)
+          }
+
           // 提取5小时会话窗口状态
           // 使用大小写不敏感的方式获取响应头
           const get5hStatus = (resHeaders) => {
@@ -2148,6 +2324,22 @@ class ClaudeRelayService {
           )
           responseStream.end()
         }
+
+        try {
+          await conversationLogService.recordConversation({
+            apiKeyId: requestOptions.apiKeyData?.id,
+            accountId,
+            accountType,
+            requestBody: body,
+            responseBody: errorMessage,
+            model: body?.model,
+            isStream: true,
+            clientVersion: clientClaudeVersion,
+            serverVersion: serverClaudeVersion
+          })
+        } catch (logError) {
+          logger.error('❌ Failed to record stream conversation log for request error:', logError)
+        }
         reject(error)
       })
 
@@ -2176,6 +2368,22 @@ class ClaudeRelayService {
             })}\n\n`
           )
           responseStream.end()
+        }
+
+        try {
+          await conversationLogService.recordConversation({
+            apiKeyId: requestOptions.apiKeyData?.id,
+            accountId,
+            accountType,
+            requestBody: body,
+            responseBody: 'Request timeout',
+            model: body?.model,
+            isStream: true,
+            clientVersion: clientClaudeVersion,
+            serverVersion: serverClaudeVersion
+          })
+        } catch (logError) {
+          logger.error('❌ Failed to record stream conversation log for request timeout:', logError)
         }
         reject(new Error('Request timeout'))
       })
@@ -2368,6 +2576,15 @@ class ClaudeRelayService {
       logger.warn(`⚠️ Error comparing Claude Code versions, defaulting to update: ${error.message}`)
       return true // 出错时优先使用新的
     }
+  }
+
+  extractClaudeCodeVersion(userAgent) {
+    if (!userAgent || typeof userAgent !== 'string') {
+      return null
+    }
+
+    const match = userAgent.match(/claude-cli\/([\d.]+(?:[a-zA-Z0-9-]*)?)/i)
+    return match ? match[1] : null
   }
 
   // 🔢 比较版本号

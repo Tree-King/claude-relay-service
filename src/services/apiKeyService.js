@@ -699,7 +699,10 @@ class ApiKeyService {
         'tags',
         'userId', // 新增：用户ID（所有者变更）
         'userUsername', // 新增：用户名（所有者变更）
-        'createdBy' // 新增：创建者（所有者变更）
+        'createdBy', // 新增：创建者（所有者变更）
+        'claudeCodeClientVersion',
+        'claudeCodeServerVersion',
+        'claudeCodeVersionUpdatedAt'
       ]
       const updatedData = { ...keyData }
 
@@ -736,6 +739,26 @@ class ApiKeyService {
     } catch (error) {
       logger.error('❌ Failed to update API key:', error)
       throw error
+    }
+  }
+
+  async recordClaudeCodeVersion(keyId, clientVersion, serverVersion) {
+    try {
+      if (!keyId || (!clientVersion && !serverVersion)) {
+        return
+      }
+
+      const updates = { claudeCodeVersionUpdatedAt: new Date().toISOString() }
+      if (clientVersion) {
+        updates.claudeCodeClientVersion = clientVersion
+      }
+      if (serverVersion) {
+        updates.claudeCodeServerVersion = serverVersion
+      }
+
+      await this.updateApiKey(keyId, updates)
+    } catch (error) {
+      logger.error(`❌ Failed to record Claude Code version for key ${keyId}:`, error)
     }
   }
 
