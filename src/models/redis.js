@@ -964,6 +964,48 @@ class RedisClient {
     }
   }
 
+  async addConversationLog(keyId, record, maxRecords = 500, ttlSeconds = 86400 * 60) {
+    const listKey = `conversation:logs:${keyId}`
+    const client = this.getClientSafe()
+
+    try {
+      await client
+        .multi()
+        .lpush(listKey, JSON.stringify(record))
+        .ltrim(listKey, 0, Math.max(0, maxRecords - 1))
+        .expire(listKey, ttlSeconds)
+        .exec()
+    } catch (error) {
+      logger.error(`❌ Failed to append conversation log for key ${keyId}:`, error)
+    }
+  }
+
+  async getConversationLogs(keyId, limit = 50) {
+    const listKey = `conversation:logs:${keyId}`
+    const client = this.getClient()
+
+    if (!client) {
+      return []
+    }
+
+    try {
+      const rawRecords = await client.lrange(listKey, 0, Math.max(0, limit - 1))
+      return rawRecords
+        .map((entry) => {
+          try {
+            return JSON.parse(entry)
+          } catch (error) {
+            logger.error('❌ Failed to parse conversation log entry:', error)
+            return null
+          }
+        })
+        .filter(Boolean)
+    } catch (error) {
+      logger.error(`❌ Failed to get conversation logs for key ${keyId}:`, error)
+      return []
+    }
+  }
+
   async getUsageRecords(keyId, limit = 50) {
     const listKey = `usage:records:${keyId}`
     const client = this.getClient()
