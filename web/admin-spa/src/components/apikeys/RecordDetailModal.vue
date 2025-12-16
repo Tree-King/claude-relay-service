@@ -142,6 +142,28 @@
           </div>
         </div>
       </div>
+
+      <!-- Conversation Log Section -->
+      <div
+        v-if="record && (record.request || record.response)"
+        class="rounded-lg border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900"
+      >
+        <h4 class="mb-3 text-sm font-semibold text-gray-800 dark:text-gray-200">对话记录</h4>
+        <div class="space-y-4">
+          <div v-if="record.request">
+            <h5 class="text-xs font-semibold text-gray-600 dark:text-gray-400">请求内容</h5>
+            <pre
+              class="mt-1 whitespace-pre-wrap rounded-md bg-gray-50 p-3 text-xs text-gray-800 dark:bg-gray-800 dark:text-gray-200"
+            ><code>{{ JSON.stringify(record.request, null, 2) }}</code></pre>
+          </div>
+          <div v-if="record.response">
+            <h5 class="text-xs font-semibold text-gray-600 dark:text-gray-400">响应内容</h5>
+            <pre
+              class="mt-1 whitespace-pre-wrap rounded-md bg-gray-50 p-3 text-xs text-gray-800 dark:bg-gray-800 dark:text-gray-200"
+            ><code>{{ record.response }}</code></pre>
+          </div>
+        </div>
+      </div>
     </div>
 
     <template #footer>

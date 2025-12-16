@@ -480,6 +480,33 @@ const authenticateApiKey = async (req, res, next) => {
       })
     }
 
+    // Strengthened client version enforcement
+    const userAgent = req.headers['user-agent'] || '';
+    if (!userAgent) {
+        logger.security(`🚫 Missing User-Agent for key: ${validation.keyData.id} (${validation.keyData.name}) from ${req.ip}. Blocking request.`);
+        return res.status(400).json({
+            error: 'Missing User-Agent',
+            message: 'A User-Agent header is required for all API requests.'
+        });
+    }
+
+    const claudeCodeRegex = /claude-cli\/(\d+\.\d+\.\d+)/;
+    const isClaudeCodeClient = claudeCodeRegex.test(userAgent);
+    const MIN_CLAUDE_VERSION = '1.0.58';
+
+    if (isClaudeCodeClient) {
+        const match = userAgent.match(claudeCodeRegex);
+        const clientVersion = match[1];
+
+        if (clientVersion < MIN_CLAUDE_VERSION) {
+            logger.security(`🚫 Mismatched Claude Code version for key: ${validation.keyData.id}. Client version: ${clientVersion}, Required: >=${MIN_CLAUDE_VERSION}. Blocking request.`);
+            return res.status(403).json({
+                error: 'Client version mismatch',
+                message: `Your Claude Code client version (${clientVersion}) is not supported. Please upgrade to version ${MIN_CLAUDE_VERSION} or newer.`
+            });
+        }
+    }
+
     const skipKeyRestrictions = isTokenCountRequest(req)
 
     // 🔒 检查客户端限制（使用新的验证器）
